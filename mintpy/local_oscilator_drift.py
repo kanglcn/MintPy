@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 ############################################################
 # Program is part of MintPy                                #
 # Copyright (c) 2013, Zhang Yunjun, Heresh Fattahi         #
@@ -11,46 +10,11 @@
 
 
 import os
-import sys
-import argparse
+
 import numpy as np
+
 from mintpy.objects import timeseries
-from mintpy.defaults.template import get_template_content
-from mintpy.utils import readfile, writefile, ptime
-
-
-#########################################################################################
-TEMPLATE = get_template_content('correct_LOD')
-
-EXAMPLE = """example:
-  local_oscilator_drift.py  timeseries.h5                 inputs/geometryRadar.h5
-  local_oscilator_drift.py  filt_101020_110220_4rlks.unw  inputs/geometryRadar.h5
-"""
-
-REFERENCE = """reference:
-  Marinkovic, P., and Y. Larsen (2013), Consequences of long-term ASAR local oscillator 
-  frequency decay - An empirical study of 10 years of data, in Living Planet Symposium,
-  Edinburgh, U.K.
-"""
-
-def create_parser():
-    parser = argparse.ArgumentParser(description='Local Oscilator Drift (LOD) correction of Envisat',
-                                     formatter_class=argparse.RawTextHelpFormatter,
-                                     epilog='{}\n{}\n{}'.format(REFERENCE, TEMPLATE, EXAMPLE))
-
-    parser.add_argument(dest='file', help='timeseries / interferograms file, i.e. timeseries.h5')
-    parser.add_argument(dest='range_dist_file',
-                        help='Slant range distance file, i.e. inputs/geometryRadar.h5, inputs/geometryGeo.h5\n' +
-                        'or use range_distance.py to generate it.')
-    parser.add_argument('-o', '--output', dest='outfile',
-                        help='Output file name for corrected file.')
-    return parser
-
-
-def cmd_line_parse(iargs=None):
-    parser = create_parser()
-    inps = parser.parse_args(args=iargs)
-    return inps
+from mintpy.utils import ptime, readfile, writefile
 
 
 #########################################################################################
@@ -77,7 +41,7 @@ def correct_local_oscilator_drift(fname, rg_dist_file=None, out_file=None):
 
     # output file name
     if not out_file:
-        out_file = '{}_LOD{}'.format(os.path.splitext(fname)[0], os.path.splitext(fname)[1])
+        out_file = f'{os.path.splitext(fname)[0]}_LOD{os.path.splitext(fname)[1]}'
 
     # Get LOD ramp rate from empirical model
     if not rg_dist_file:
@@ -119,18 +83,5 @@ def correct_local_oscilator_drift(fname, rg_dist_file=None, out_file=None):
         writefile.write(data, out_file=out_file, metadata=atr)
     else:
         print('No need to correct for LOD for %s file' % (k))
+
     return out_file
-
-
-#########################################################################################
-def main(iargs=None):
-    inps = cmd_line_parse(iargs)
-
-    inps.outfile = correct_local_oscilator_drift(inps.file, inps.range_dist_file, inps.outfile)
-    print('Done.')
-    return
-
-
-#########################################################################################
-if __name__ == '__main__':
-    main(sys.argv[1:])

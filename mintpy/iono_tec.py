@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 ############################################################
 # Program is part of MintPy                                #
 # Copyright (c) 2013, Zhang Yunjun, Heresh Fattahi         #
@@ -6,117 +5,18 @@
 ############################################################
 
 
+import datetime as dt
 import os
-import sys
 import time
-import argparse
+
 import h5py
 import numpy as np
 
 import mintpy
-from mintpy.objects import timeseries
-from mintpy.utils import ptime, readfile, writefile, utils as ut
+from mintpy.objects import ionex, timeseries
+from mintpy.objects.constants import SPEED_OF_LIGHT
 from mintpy.simulation import iono
-
-
-SPEED_OF_LIGHT = 299792458 # m/s
-
-
-
-#####################################################################################
-REFERENCE = """references:
-  Yunjun, Z., Fattahi, H., Pi, X., Rosen, P., Simons, M., Agram, P., & Aoki, Y. (2022). Range
-    Geolocation Accuracy of C/L-band SAR and its Implications for Operational Stack Coregistration.
-    IEEE Trans. Geosci. Remote Sens., doi:10.1109/TGRS.2022.3168509. 
-  Schaer, S., Gurtner, W., & Feltens, J. (1998). IONEX: The ionosphere map exchange format version 1.1. 
-    Paper presented at the Proceedings of the IGS AC workshop, Darmstadt, Germany, Darmstadt, Germany.
-"""
-
-EXAMPLE = """example:
-  iono_tec.py timeseriesRg.h5 -g inputs/geometryRadar.h5
-  iono_tec.py timeseriesRg.h5 -g inputs/geometryRadar.h5 -s cod
-"""
-
-def create_parser():
-    parser = argparse.ArgumentParser(description='Calculate ionospheric ramps using Global Iono Maps (GIM) from GNSS-based TEC products.',
-                                     formatter_class=argparse.RawTextHelpFormatter,
-                                     epilog=REFERENCE+'\n'+EXAMPLE)
-    parser.add_argument('dis_file', help='displacement time-series HDF5 file, i.e. timeseries.h5')
-    parser.add_argument('-g','--geomtry', dest='geom_file', type=str, required=True,
-                        help='geometry file including incidence/azimuthAngle.')
-    parser.add_argument('-s','--sol','--tec-sol', dest='tec_sol', default='jpl',
-                        help='TEC solution center (default: %(default)s). \n'
-                             '    jpl - JPL (Final)\n'
-                             '    igs - IGS (Final)\n'
-                             '    cod - CODE (Final)\n'
-                             'Check more at:\n'
-                             '    https://cddis.nasa.gov/Data_and_Derived_Products/GNSS/atmospheric_products.html')
-    parser.add_argument('--tec-dir', dest='tec_dir', default='${WEATHER_DIR}/GIM_IGS',
-                        help='directory of downloaded GNSS TEC data (default: %(default)s).')
-
-    # output
-    parser.add_argument('--update', dest='update_mode', action='store_true', help='Enable update mode.')
-    parser.add_argument('--iono-file', dest='iono_file', help='calculated LOS iono ramp time-series file.')
-    #parser.add_argument('-o', dest='cor_dis_file', help='Output file name for the corrected time-series.')
-
-    # GIM extraction
-    tec_cfg = parser.add_argument_group('GIM extraction',
-                                        'Parameters to extract TEC at point of interest from GIM (mainly for impact demonstration).')
-    tec_cfg.add_argument('-i','--interp', dest='interp_method', default='linear3d', choices={'nearest', 'linear2d', 'linear3d'},
-                         help='Interpolation method to grab the GIM value at the point of interest (default: %(default)s).')
-    tec_cfg.add_argument('--norotate', dest='rotate_tec_map', action='store_false',
-                         help="Rotate TEC maps along the longitude direction to compensate the correlation between\n"
-                              "the ionosphere and the Sun's position, as suggested by Schaer et al. (1998).\n"
-                              "For 'interp_method == linear3d' ONLY. (default: %(default)s).")
-    tec_cfg.add_argument('--ratio', dest='sub_tec_ratio', type=str,
-                         help='Ratio to calculate the sub-orbital TEC from the total TEC.\n'
-                              'Set to "adaptive" for seasonally adaptive scaling.\n'
-                              '     Based on equation (14) from Yunjun et al. (2022).\n'
-                              'Set to "a value" within (0,1] for a fixed scaling\n'
-                              'E.g. 0.75 for TerraSAR-X (Gisinger et al., 2021)\n'
-                              '     0.90 for Sentinel-1 (Gisinger et al., 2021)\n'
-                              '     0.69 for Sentinel-1 (Yunjun et al., 2022)\n')
-
-    return parser
-
-
-def cmd_line_parse(iargs=None):
-    parser = create_parser()
-    inps = parser.parse_args(args=iargs)
-
-    # --tec-dir
-    inps.tec_dir = os.path.expanduser(inps.tec_dir)
-    inps.tec_dir = os.path.expandvars(inps.tec_dir)
-    if not os.path.isdir(inps.tec_dir):
-        print(f'WARNING: Input TEC dir "{inps.tec_dir}" does not exist!')
-        inps.tec_dir = os.path.join(os.path.dirname(inps.dis_file), 'TEC')
-        print(f'Use "{inps.tec_dir}" instead.')
-
-    # --ratio
-    if inps.sub_tec_ratio is None:
-        suffix = ''
-    elif ut.is_number(inps.sub_tec_ratio):
-        suffix = 'R{:.0f}'.format(float(inps.sub_tec_ratio)*100)
-    elif inps.sub_tec_ratio.startswith('adap'):
-        suffix = 'RA'
-    else:
-        raise ValueError('Input is neither a number nor startswith adap!')
-
-    # input/output filenames
-    inps.dis_file = os.path.abspath(inps.dis_file)
-    inps.geom_file = os.path.abspath(inps.geom_file)
-
-    if not inps.iono_file:
-        geom_dir = os.path.dirname(inps.geom_file)
-        inps.iono_file = os.path.join(geom_dir, 'TEC{}lr{}.h5'.format(inps.tec_sol[0], suffix))
-
-    #if not inps.cor_dis_file:
-    #    dis_dir = os.path.dirname(inps.dis_file)
-    #    fbase, fext = os.path.splitext(os.path.basename(inps.dis_file))
-    #    suffix = os.path.splitext(os.path.basename(inps.iono_file))[0]
-    #    inps.cor_dis_file = os.path.join(dis_dir, f'{fbase}_{suffix}{fext}')
-
-    return inps
+from mintpy.utils import ptime, readfile, utils as ut, writefile
 
 
 #####################################################################################
@@ -128,10 +28,10 @@ def get_dataset_size(fname):
 
 def run_or_skip(iono_file, grib_files, dis_file, geom_file):
     print('update mode: ON')
-    print('output file: {}'.format(iono_file))
+    print(f'output file: {iono_file}')
     flag = 'skip'
 
-    # check existance and modification time
+    # check existence and modification time
     if ut.run_or_skip(out_file=iono_file, in_file=grib_files, print_msg=False) == 'run':
         flag = 'run'
         print('1) output file either do NOT exist or is NOT newer than all IONEX files.')
@@ -146,7 +46,8 @@ def run_or_skip(iono_file, grib_files, dis_file, geom_file):
         date_list_ion = timeseries(iono_file).get_date_list()
         if ds_size_ion != ds_size_dis or any (x not in date_list_ion for x in date_list_dis):
             flag = 'run'
-            print(f'2) output file does NOT have the same len/wid as the geometry file {geom_file} or does NOT contain all dates')
+            print(f'2) output file does NOT have the same len/wid as the geometry file {geom_file}'
+                  ' or does NOT contain all dates')
         else:
             print('2) output file has the same len/wid as the geometry file and contains all dates')
 
@@ -159,22 +60,22 @@ def run_or_skip(iono_file, grib_files, dis_file, geom_file):
                     print('3) output file is fully written.')
 
     # result
-    print('run or skip: {}'.format(flag))
+    print(f'run or skip: {flag}')
     return flag
 
 
 #####################################################################################
-def download_igs_tec(date_list, tec_dir, tec_sol='jpl'):
-    """Download IGS TEC products for the input list of dates.
+def download_ionex_files(date_list, tec_dir, sol_code='jpl'):
+    """Download IGS TEC products in IONEX format for the input list of dates.
 
     Parameters: date_list - list of str, in YYYYMMDD
                 tec_dir   - str, path to IGS_TEC directory, e.g. ~/data/aux/IGS_TEC
-                tec_sol   - str, TEC solution center, e.g. jpl, cod, igs
+                sol_code   - str, TEC solution center, e.g. jpl, cod, igs
     Returns:    fnames    - list of str, path of the downloaded TEC files
     """
     print("\n------------------------------------------------------------------------------")
-    print("downloading GNSS-based TEC products from NASA's Archive of Space Geodesy Data (CDDIS) ...")
-    print('Link: https://cddis.nasa.gov/Data_and_Derived_Products/GNSS/atmospheric_products.html')
+    print("downloading GNSS-based TEC products in IONEX format from NASA/CDDIS ...")
+    print('https://cddis.nasa.gov/Data_and_Derived_Products/GNSS/atmospheric_products.html')
     num_date = len(date_list)
     n = len(str(num_date))
     print(f'number of TEC files to download: {num_date}')
@@ -183,7 +84,7 @@ def download_igs_tec(date_list, tec_dir, tec_sol='jpl'):
     # output file names/sizes
     fnames = []
     for date_str in date_list:
-        fnames.append(iono.get_igs_tec_filename(tec_dir, date_str, sol=tec_sol))
+        fnames.append(ionex.get_ionex_filename(date_str, tec_dir=tec_dir, sol_code=sol_code))
 
     # remove all existing files
     debug_mode = False
@@ -207,23 +108,24 @@ def download_igs_tec(date_list, tec_dir, tec_sol='jpl'):
 
     num_date2dload = len(date_list2dload)
     if num_date2dload == 0:
-        print(f'ALL files exists with consistent file size (~{fsizec:.0f} KB) --> skip re-downloading.\n')
+        print(f'ALL files exists with consistent file size (~{fsizec:.0f} KB)'
+              ' --> skip re-downloading.\n')
 
     else:
         for i, date_str in enumerate(date_list2dload):
             print('-'*20)
-            print('DATE {}/{}: {}'.format(i+1, num_date2dload, date_str))
-            iono.dload_igs_tec(date_str, tec_dir, sol=tec_sol, print_msg=True)
+            print(f'DATE {i+1}/{num_date2dload}: {date_str}')
+            ionex.dload_ionex(date_str, tec_dir=tec_dir, sol_code=sol_code, print_msg=True)
 
         # print file size info, after downloading
         fsizes = [os.path.getsize(i) / 1024 if os.path.isfile(i) else 0 for i in fnames]
         for i in range(num_date):
-            print('[{i:0{n}d}/{N}] {f}: {s:.2f} KB'.format(n=n, i=i+1, N=num_date, f=fnames[i], s=fsizes[i]))
+            print(f'[{i+1:0{n}d}/{num_date}] {fnames[i]}: {fsizes[i]:.2f} KB')
 
     return fnames
 
 
-def calc_iono_ramp_timeseries_igs(tec_dir, tec_sol, interp_method, ts_file, geom_file, iono_file,
+def calc_iono_ramp_timeseries_igs(tec_dir, sol_code, interp_method, ts_file, geom_file, iono_file,
                                   rotate_tec_map=True, sub_tec_ratio=None, update_mode=True):
     """Calculate the time-series of 2D ionospheric delay from IGS TEC data.
     Considering the variation of the incidence angle along range direction.
@@ -242,26 +144,31 @@ def calc_iono_ramp_timeseries_igs(tec_dir, tec_sol, interp_method, ts_file, geom
     date_list = timeseries(ts_file).get_date_list()
     meta = readfile.read_attribute(ts_file)
     utc_sec = float(meta['CENTER_LINE_UTC'])
-    h, s = divmod(utc_sec, 3600)
-    m, s = divmod(s, 60)
-    print('UTC time: {:02.0f}:{:02.0f}:{:02.1f}'.format(h, m, s))
+    print(f'CENTER_LINE_TUC: {utc_sec}')
+
+    # UTC time & local solar time
+    # use an arbitrary date to construct the datetime object
+    lon_c = (float(meta['LON_REF1']) + float(meta['LON_REF2'])) / 2
+    utc_dt = dt.datetime(2020, 1, 1) + dt.timedelta(seconds=utc_sec)
+    local_dt = ptime.utc2solar_time(utc_dt, lon_c)
+    print('UTC time:', utc_dt.strftime("%H:%M:%S"))
+    print('Local solar time:', local_dt.strftime("%I:%M %p"))
 
     # read IGS TEC
-    vtec_list = []
     print('read IGS TEC file ...')
-    print('interpolation method: {}'.format(interp_method))
+    print(f'interpolation method: {interp_method}')
+    if interp_method == 'linear3d':
+        print(f'rotate TEC maps: {rotate_tec_map}')
+
+    vtec_list = []
     prog_bar = ptime.progressBar(maxValue=len(date_list))
     for i, date_str in enumerate(date_list):
         # read zenith TEC
-        tec_file = iono.get_igs_tec_filename(tec_dir, date_str, sol=tec_sol)
-        vtec = iono.get_igs_tec_value(
-            tec_file,
-            utc_sec,
-            lat=iono_lat,
-            lon=iono_lon,
-            interp_method=interp_method,
-            rotate_tec_map=rotate_tec_map,
-        )
+        tec_file = ionex.get_ionex_filename(date_str, tec_dir=tec_dir, sol_code=sol_code)
+        vtec = ionex.get_ionex_value(tec_file, utc_sec,
+                                     lat=iono_lat, lon=iono_lon,
+                                     interp_method=interp_method,
+                                     rotate_tec_map=rotate_tec_map)
         vtec_list.append(vtec)
         prog_bar.update(i+1, suffix=date_str)
     prog_bar.close()
@@ -316,14 +223,14 @@ def vtec2iono_ramp_timeseries(date_list, vtec_list, geom_file, iono_file, sub_te
     # thus this is not used by default.
     if sub_tec_ratio is not None:
         if ut.is_number(sub_tec_ratio):
-            print('multiply VTEC by {}'.format(sub_tec_ratio))
+            print(f'multiply VTEC by {sub_tec_ratio}')
             vtec_list = (np.array(vtec_list).flatten() * float(sub_tec_ratio)).tolist()
 
         elif sub_tec_ratio.startswith('adap'):
             dates = ptime.date_list2vector(date_list)[0]
             ydays = np.array([x.timetuple().tm_yday for x in dates])
             fc = np.loadtxt(top_perc_file, dtype=bytes).astype(np.float32)
-            print('multiply VTEC adaptively based on the day of the year from: {}'.format(top_perc_file))
+            print(f'multiply VTEC adaptively based on the day of the year from: {top_perc_file}')
             sub_perc = fc[:,2][np.array(ydays)]
             vtec_list = (np.array(vtec_list).flatten() * sub_perc).tolist()
 
@@ -378,28 +285,30 @@ def correct_timeseries(dis_file, iono_file, cor_dis_file):
     # between the absolute iono ramp and the double referenced time-series
     print('\n------------------------------------------------------------------------------')
     print('correcting relative delay for input time-series using diff.py')
-    from mintpy import diff
 
     iargs = [dis_file, iono_file, '-o', cor_dis_file]
     print('diff.py', ' '.join(iargs))
-    diff.main(iargs)
+
+    import mintpy.cli.diff
+    mintpy.cli.diff.main(iargs)
+
     return cor_dis_file
 
 
-#####################################################################################
-def main(iargs=None):
-    inps = cmd_line_parse(iargs)
+def run_iono_tec(inps):
+    """Calculate and/or correct for the ionospheric delay using TEC from GIM."""
+
     start_time = time.time()
 
     # download
     date_list = timeseries(inps.dis_file).get_date_list()
-    tec_files = download_igs_tec(date_list, tec_dir=inps.tec_dir, tec_sol=inps.tec_sol)
+    tec_files = download_ionex_files(date_list, tec_dir=inps.tec_dir, sol_code=inps.sol_code)
 
     # calculate
     if run_or_skip(inps.iono_file, tec_files, inps.dis_file, inps.geom_file) == 'run':
         calc_iono_ramp_timeseries_igs(
             tec_dir=inps.tec_dir,
-            tec_sol=inps.tec_sol,
+            sol_code=inps.sol_code,
             interp_method=inps.interp_method,
             ts_file=inps.dis_file,
             geom_file=inps.geom_file,
@@ -414,11 +323,8 @@ def main(iargs=None):
     #                   iono_file=inps.iono_file,
     #                   cor_dis_file=inps.cor_dis_file)
 
+    # used time
     m, s = divmod(time.time() - start_time, 60)
-    print('time used: {:02.0f} mins {:02.1f} secs.\n'.format(m, s))
+    print(f'time used: {m:02.0f} mins {s:02.1f} secs.\n')
+
     return
-
-
-#####################################################################################
-if __name__ == '__main__':
-    main(sys.argv[1:])
